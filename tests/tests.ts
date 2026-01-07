@@ -6,8 +6,9 @@ import { PublicKey } from '@solana/web3.js';
 import { getAssociatedTokenAddress, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import { BN } from '@coral-xyz/anchor';
 import { constants } from './contstants';
-import { getDummyKey, pda } from './utils';
+import { getDummyKey, pda, createLightRpc, deriveStakeAddress } from './utils';
 import { utf8 } from '@coral-xyz/anchor/dist/cjs/utils/bytes';
+import idl from '../target/idl/nosana_staking.json';
 
 // local test suites
 import initTests from './suites/1-initialization-tests';
@@ -45,6 +46,10 @@ describe('nosana programs', async function () {
     this.rewardsProgram = anchor.workspace.NosanaRewards;
     this.nodesProgram = anchor.workspace.NosanaNodes;
     this.metaplex = Metaplex.make(this.connection).use(walletAdapterIdentity(this.wallet));
+
+    // Light Protocol RPC and coder for compressed stake accounts
+    this.rpc = createLightRpc();
+    this.coder = new anchor.BorshCoder(idl as anchor.Idl);
 
     // constant values
     this.constants = constants;
@@ -112,10 +117,8 @@ describe('nosana programs', async function () {
     this.accounts.rewardsVault = this.vaults.rewards;
     this.accounts.rewardsReflection = this.accounts.reflection;
     this.accounts.node = await pda([utf8.encode('node'), this.publicKey.toBuffer()], this.nodesProgram.programId);
-    this.accounts.stake = await pda(
-      [utf8.encode('stake'), this.mint.toBuffer(), this.publicKey.toBuffer()],
-      this.stakingProgram.programId,
-    );
+    // stake is now a compressed account address, not a PDA
+    this.accounts.stake = deriveStakeAddress(this.mint, this.publicKey, this.stakingProgram.programId);
   });
 
   switch (process.env.TEST_SCENARIO) {

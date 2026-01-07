@@ -6,6 +6,9 @@ import { utf8 } from '@coral-xyz/anchor/dist/cjs/utils/bytes';
 import { afterEach, Context } from 'mocha';
 import { transfer } from '@solana/spl-token';
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Accounts = any;
+
 /**
  * Function to add additional funds to the vault from the pool
  * @param mochaContext
@@ -63,7 +66,7 @@ export default function suite() {
       // open pool
       await this.poolsProgram.methods
         .open(new BN(this.constants.emission), new BN(startTime), this.constants.claimType.transfer, true)
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .signers([throwAwayKeypair])
         .rpc();
 
@@ -85,7 +88,7 @@ export default function suite() {
       let msg = '';
       await this.poolsProgram.methods
         .claimTransfer()
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.PoolUnderfunded);
@@ -94,7 +97,7 @@ export default function suite() {
     it('can claim a multiple of emission', async function () {
       await fundPool(this, this.constants.emission * 3);
       const beneficiaryBalanceBefore = await getTokenBalance(this.provider, this.accounts.beneficiary);
-      await this.poolsProgram.methods.claimTransfer().accounts(this.accounts).rpc();
+      await this.poolsProgram.methods.claimTransfer().accounts(this.accounts as Accounts).rpc();
       const beneficiaryBalanceAfter = await getTokenBalance(this.provider, this.accounts.beneficiary);
 
       // determine payout
@@ -129,7 +132,7 @@ export default function suite() {
           authority: this.users.user1.publicKey,
           beneficiary: this.users.user1.ata,
           newBeneficiary: this.users.user2.ata,
-        })
+        } as Accounts)
         .signers([this.users.user1.user])
         .rpc();
     });

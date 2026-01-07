@@ -1,7 +1,21 @@
 import * as anchor from '@coral-xyz/anchor';
+import { web3 } from '@coral-xyz/anchor';
 import { expect } from 'chai';
-import { calculateXnos, getTokenBalance, sleep } from '../utils';
+import {
+  calculateXnos,
+  getTokenBalance,
+  sleep,
+  prepareStakeCreate,
+  prepareStakeOperation,
+  prepareStakeReadOnly,
+  fetchCompressedStake,
+  deriveStakeAddress,
+} from '../utils';
 import { beforeEach } from 'mocha';
+import { PublicKey } from '@solana/web3.js';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Accounts = any;
 
 export default function suite() {
   beforeEach(async function () {
@@ -22,7 +36,7 @@ export default function suite() {
 
   describe('init()', async function () {
     it('can initialize', async function () {
-      await this.stakingProgram.methods.init().accounts(this.accounts).rpc();
+      await this.stakingProgram.methods.init().accounts(this.accounts as Accounts).rpc();
     });
   });
 
@@ -30,9 +44,26 @@ export default function suite() {
     it('can not stake too short', async function () {
       let msg = '';
       this.accounts.vault = this.vaults.staking;
+
+      // Prepare compressed account creation
+      const { proof, addressTreeInfo, outputStateTreeIndex, remainingAccounts } = await prepareStakeCreate(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .stake(new anchor.BN(this.constants.stakeAmount), new anchor.BN(this.constants.stakeDurationMin - 1))
-        .accounts(this.accounts)
+        .stake(
+          new anchor.BN(this.constants.stakeAmount),
+          new anchor.BN(this.constants.stakeDurationMin - 1),
+          proof,
+          addressTreeInfo,
+          outputStateTreeIndex,
+        )
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.StakeDurationTooShort);
@@ -40,25 +71,58 @@ export default function suite() {
 
     it('can not stake too long', async function () {
       let msg = '';
+
+      // Prepare compressed account creation
+      const { proof, addressTreeInfo, outputStateTreeIndex, remainingAccounts } = await prepareStakeCreate(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .stake(new anchor.BN(this.constants.stakeAmount), new anchor.BN(this.constants.stakeDurationMax + 1))
-        .accounts(this.accounts)
+        .stake(
+          new anchor.BN(this.constants.stakeAmount),
+          new anchor.BN(this.constants.stakeDurationMax + 1),
+          proof,
+          addressTreeInfo,
+          outputStateTreeIndex,
+        )
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.StakeDurationTooLong);
     });
 
     it('can stake minimum', async function () {
+      // Prepare compressed account creation
+      const { proof, addressTreeInfo, outputStateTreeIndex, remainingAccounts } = await prepareStakeCreate(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .stake(new anchor.BN(this.constants.stakeMinimum), new anchor.BN(this.constants.stakeDurationMin))
-        .accounts(this.accounts)
+        .stake(
+          new anchor.BN(this.constants.stakeMinimum),
+          new anchor.BN(this.constants.stakeDurationMin),
+          proof,
+          addressTreeInfo,
+          outputStateTreeIndex,
+        )
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .rpc();
       this.balances.user -= this.constants.stakeMinimum;
       this.balances.vaultStaking += this.constants.stakeMinimum;
       this.exists.stake = true;
 
-      // test stake
-      const stake = await this.stakingProgram.account.stakeAccount.fetch(this.accounts.stake);
+      // test stake - fetch from compressed account
+      const stake = await fetchCompressedStake(this.rpc, this.accounts.stake, this.coder);
       expect(stake.amount.toNumber()).to.equal(this.constants.stakeMinimum, 'amount');
       expect(stake.vault.toString()).to.equal(this.accounts.vault.toString(), 'vault');
       expect(stake.authority.toString()).to.equal(this.accounts.authority.toString(), 'authority');
@@ -70,15 +134,30 @@ export default function suite() {
     });
 
     it('can stake maximum for user 4', async function () {
+      // Prepare compressed account creation for user 4
+      const { proof, addressTreeInfo, outputStateTreeIndex, remainingAccounts } = await prepareStakeCreate(
+        this.rpc,
+        this.users.user4.stake,
+        this.stakingProgram.programId,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .stake(new anchor.BN(this.constants.stakeAmount), new anchor.BN(this.constants.stakeDurationMax))
+        .stake(
+          new anchor.BN(this.constants.stakeAmount),
+          new anchor.BN(this.constants.stakeDurationMax),
+          proof,
+          addressTreeInfo,
+          outputStateTreeIndex,
+        )
         .accounts({
           ...this.accounts,
           user: this.users.user4.ata,
           authority: this.users.user4.publicKey,
-          stake: this.users.user4.stake,
           vault: this.users.user4.vault,
-        })
+        } as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([this.users.user4.user])
         .rpc();
       this.users.user4.balance -= this.constants.stakeAmount;
@@ -86,40 +165,81 @@ export default function suite() {
 
     it('can stake for node 1', async function () {
       const amount = this.constants.minimumNodeStake - 1;
+
+      // Prepare compressed account creation for node 1
+      const { proof, addressTreeInfo, outputStateTreeIndex, remainingAccounts } = await prepareStakeCreate(
+        this.rpc,
+        this.users.node1.stake,
+        this.stakingProgram.programId,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .stake(new anchor.BN(amount), new anchor.BN(this.constants.stakeDurationMin))
+        .stake(
+          new anchor.BN(amount),
+          new anchor.BN(this.constants.stakeDurationMin),
+          proof,
+          addressTreeInfo,
+          outputStateTreeIndex,
+        )
         .accounts({
           ...this.accounts,
           user: this.users.node1.ata,
           authority: this.users.node1.publicKey,
-          stake: this.users.node1.stake,
           vault: this.users.node1.vault,
-        })
+        } as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([this.users.node1.user])
         .rpc();
       this.users.node1.balance -= amount;
     });
 
     it('can stake for node 2, and unstake', async function () {
+      // Prepare compressed account creation for node 2
+      const { proof, addressTreeInfo, outputStateTreeIndex, remainingAccounts } = await prepareStakeCreate(
+        this.rpc,
+        this.users.node2.stake,
+        this.stakingProgram.programId,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .stake(new anchor.BN(this.constants.minimumNodeStake), new anchor.BN(this.constants.stakeDurationMin))
+        .stake(
+          new anchor.BN(this.constants.minimumNodeStake),
+          new anchor.BN(this.constants.stakeDurationMin),
+          proof,
+          addressTreeInfo,
+          outputStateTreeIndex,
+        )
         .accounts({
           ...this.accounts,
           user: this.users.node2.ata,
           authority: this.users.node2.publicKey,
-          stake: this.users.node2.stake,
           vault: this.users.node2.vault,
-        })
+        } as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([this.users.node2.user])
         .rpc();
+
+      // Now unstake - need to get the stake data and proof
+      const {
+        proof: unstakeProof,
+        stakeAccountMeta,
+        stakeData,
+        remainingAccounts: unstakeRemainingAccounts,
+      } = await prepareStakeOperation(this.rpc, this.users.node2.stake, this.stakingProgram.programId, this.coder);
+
       await this.stakingProgram.methods
-        .unstake()
+        .unstake(unstakeProof, stakeAccountMeta, stakeData)
         .accounts({
           ...this.accounts,
           authority: this.users.node2.publicKey,
           reward: this.users.node2.reward,
-          stake: this.users.node2.stake,
         })
+        .remainingAccounts(unstakeRemainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([this.users.node2.user])
         .rpc();
       this.users.node2.balance -= this.constants.minimumNodeStake;
@@ -127,15 +247,30 @@ export default function suite() {
 
     it('can stake for other nodes', async function () {
       for (const node of this.users.otherNodes) {
+        // Prepare compressed account creation for each node
+        const { proof, addressTreeInfo, outputStateTreeIndex, remainingAccounts } = await prepareStakeCreate(
+          this.rpc,
+          node.stake,
+          this.stakingProgram.programId,
+        );
+
+        const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
         await this.stakingProgram.methods
-          .stake(new anchor.BN(this.constants.stakeAmount * 2), new anchor.BN(3 * this.constants.stakeDurationMin))
+          .stake(
+            new anchor.BN(this.constants.stakeAmount * 2),
+            new anchor.BN(3 * this.constants.stakeDurationMin),
+            proof,
+            addressTreeInfo,
+            outputStateTreeIndex,
+          )
           .accounts({
             ...this.accounts,
             user: node.ata,
             authority: node.publicKey,
-            stake: node.stake,
             vault: node.vault,
-          })
+          } as Accounts)
+          .remainingAccounts(remainingAccounts)
+          .preInstructions([computeBudgetIx])
           .signers([node.user])
           .rpc();
         node.balance -= this.constants.stakeAmount * 2;
@@ -145,31 +280,69 @@ export default function suite() {
   });
 
   describe('extend()', async function () {
-    it('can extend with negative duration', async function () {
-      const accountBefore = await this.stakingProgram.account.stakeAccount.fetch(this.accounts.stake);
-      await this.stakingProgram.methods.extend(new anchor.BN(-7)).accounts(this.accounts).rpc();
-      const accountAfter = await this.stakingProgram.account.stakeAccount.fetch(this.accounts.stake);
+    it('can extend stake duration', async function () {
+      const accountBefore = await fetchCompressedStake(this.rpc, this.accounts.stake, this.coder);
+
+      // Prepare extend operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      await this.stakingProgram.methods
+        .extend(new anchor.BN(7), proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .rpc();
+      const accountAfter = await fetchCompressedStake(this.rpc, this.accounts.stake, this.coder);
       expect(accountAfter.duration.toNumber()).to.equal(accountBefore.duration.toNumber() + 7);
     });
 
     it('can not extend a stake that is too long', async function () {
       let msg = '';
+
+      // Prepare extend operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .extend(new anchor.BN(this.constants.stakeDurationMax))
-        .accounts(this.accounts)
+        .extend(new anchor.BN(this.constants.stakeDurationMax), proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.StakeDurationTooLong);
     });
 
     it('can extend a stake', async function () {
+      // Prepare extend operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .extend(new anchor.BN(this.constants.stakeDurationMin))
-        .accounts(this.accounts)
+        .extend(new anchor.BN(this.constants.stakeDurationMin), proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .rpc();
 
       // check stake
-      const stake = await this.stakingProgram.account.stakeAccount.fetch(this.accounts.stake);
+      const stake = await fetchCompressedStake(this.rpc, this.accounts.stake, this.coder);
       expect(stake.duration.toNumber()).to.equal(this.constants.stakeDurationMin * 2 + 7);
       expect(stake.amount.toNumber()).to.equal(this.constants.stakeMinimum);
       expect(stake.xnos.toNumber()).to.equal(
@@ -182,9 +355,22 @@ export default function suite() {
   describe('unstake()', async function () {
     it('can unstake from other account', async function () {
       let msg = '';
+
+      // Prepare unstake operation - get the stake data for main user
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .unstake()
-        .accounts({ ...this.accounts, authority: this.users.user3.publicKey })
+        .unstake(proof, stakeAccountMeta, stakeData)
+        .accounts({
+          ...this.accounts, authority: this.users.user3.publicKey })
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([this.users.user3.user])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
@@ -193,34 +379,71 @@ export default function suite() {
 
     it('can not unstake with invalid reward account', async function () {
       let msg = '';
+
+      // Prepare unstake operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .unstake()
+        .unstake(proof, stakeAccountMeta, stakeData)
         .accounts({
           ...this.accounts,
           reward: anchor.web3.Keypair.generate().publicKey,
         })
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.InvalidAccount);
 
+      // Get fresh proof for second attempt
+      const {
+        proof: proof2,
+        stakeAccountMeta: stakeAccountMeta2,
+        stakeData: stakeData2,
+        remainingAccounts: remainingAccounts2,
+      } = await prepareStakeOperation(this.rpc, this.accounts.stake, this.stakingProgram.programId, this.coder);
+
       await this.stakingProgram.methods
-        .unstake()
+        .unstake(proof2, stakeAccountMeta2, stakeData2)
         .accounts({
           ...this.accounts,
           reward: this.accounts.stake,
         })
+        .remainingAccounts(remainingAccounts2)
+        .preInstructions([computeBudgetIx])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.StakeHasReward);
     });
 
     it('can unstake', async function () {
-      await this.stakingProgram.methods.unstake().accounts(this.accounts).rpc();
-      const data = await this.stakingProgram.account.stakeAccount.fetch(this.accounts.stake);
+      // Prepare unstake operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      await this.stakingProgram.methods
+        .unstake(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .rpc();
+
+      const data = await fetchCompressedStake(this.rpc, this.accounts.stake, this.coder);
       expect(Date.now() / 1e3).to.be.closeTo(data.timeUnstake.toNumber(), 3);
 
       // check stake
-      const stake = await this.stakingProgram.account.stakeAccount.fetch(this.accounts.stake);
+      const stake = await fetchCompressedStake(this.rpc, this.accounts.stake, this.coder);
       expect(stake.xnos.toNumber()).to.equal(0);
     });
   });
@@ -228,25 +451,69 @@ export default function suite() {
   describe('topup(), restake()', async function () {
     it('can not topup after unstake', async function () {
       let msg = '';
+
+      // Prepare topup operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .topup(new anchor.BN(this.constants.stakeAmount))
-        .accounts(this.accounts)
+        .topup(new anchor.BN(this.constants.stakeAmount), proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.StakeAlreadyUnstaked);
     });
 
     it('can restake', async function () {
-      await this.stakingProgram.methods.restake().accounts(this.accounts).rpc();
+      // Prepare restake operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      await this.stakingProgram.methods
+        .restake(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .rpc();
+
+      // Verify restake cleared the unstake timestamp
+      const stakeAccount = await fetchCompressedStake(this.rpc, this.accounts.stake, this.coder);
+      expect(stakeAccount.timeUnstake.toNumber()).to.equal(0);
     });
 
     it('can topup', async function () {
-      await this.stakingProgram.methods.topup(new anchor.BN(this.constants.stakeAmount)).accounts(this.accounts).rpc();
+      // Prepare topup operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      await this.stakingProgram.methods
+        .topup(new anchor.BN(this.constants.stakeAmount), proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .rpc();
       this.balances.user -= this.constants.stakeAmount;
       this.balances.vaultStaking += this.constants.stakeAmount;
 
       // check stake
-      const stake = await this.stakingProgram.account.stakeAccount.fetch(this.accounts.stake);
+      const stake = await fetchCompressedStake(this.rpc, this.accounts.stake, this.coder);
       expect(stake.duration.toNumber()).to.equal(this.constants.stakeDurationMin * 2 + 7, 'duration');
       expect(stake.amount.toNumber()).to.equal(this.constants.stakeMinimum + this.constants.stakeAmount, 'amount');
       expect(stake.xnos.toNumber()).to.equal(
@@ -262,27 +529,79 @@ export default function suite() {
   describe('close()', async function () {
     it('can not close before unstake', async function () {
       let msg = '';
+
+      // Prepare close operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .close()
-        .accounts(this.accounts)
+        .close(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.StakeNotUnstaked);
     });
 
     it('can unstake', async function () {
-      await this.stakingProgram.methods.unstake().accounts(this.accounts).rpc();
+      // Prepare unstake operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      await this.stakingProgram.methods
+        .unstake(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .rpc();
     });
 
     it('can not close after too soon unstake', async function () {
       let msg = '';
+
+      // Prepare close operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .close()
-        .accounts(this.accounts)
+        .close(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.StakeLocked);
-      await this.stakingProgram.methods.restake().accounts(this.accounts).rpc();
+
+      // Get fresh proof for restake
+      const {
+        proof: restakeProof,
+        stakeAccountMeta: restakeStakeAccountMeta,
+        stakeData: restakeStakeData,
+        remainingAccounts: restakeRemainingAccounts,
+      } = await prepareStakeOperation(this.rpc, this.accounts.stake, this.stakingProgram.programId, this.coder);
+
+      await this.stakingProgram.methods
+        .restake(restakeProof, restakeStakeAccountMeta, restakeStakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(restakeRemainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .rpc();
     });
 
     //
@@ -317,18 +636,48 @@ export default function suite() {
     it('can withdraw after unstake', async function () {
       const seconds = 10; // increase this number get a higher test reliability
       const duration = this.constants.stakeDurationMin * 2 + 7;
-      const amount = (await this.stakingProgram.account.stakeAccount.fetch(this.accounts.stake)).amount.toNumber();
+      const stakeDataBefore = await fetchCompressedStake(this.rpc, this.accounts.stake, this.coder);
+      const amount = stakeDataBefore.amount.toNumber();
       const emission = amount / duration;
       const expectedWithdraw = Math.floor(emission * seconds);
 
-      await this.stakingProgram.methods.unstake().accounts(this.accounts).rpc();
+      // Prepare unstake operation
+      const {
+        proof: unstakeProof,
+        stakeAccountMeta: unstakeStakeAccountMeta,
+        stakeData: unstakeStakeData,
+        remainingAccounts: unstakeRemainingAccounts,
+      } = await prepareStakeOperation(this.rpc, this.accounts.stake, this.stakingProgram.programId, this.coder);
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      await this.stakingProgram.methods
+        .unstake(unstakeProof, unstakeStakeAccountMeta, unstakeStakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(unstakeRemainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .rpc();
+
       await sleep(seconds);
-      await this.stakingProgram.methods.withdraw().accounts(this.accounts).rpc();
+
+      // Prepare withdraw operation (read-only)
+      const {
+        proof: withdrawProof,
+        stakeAccountMeta: withdrawStakeAccountMeta,
+        stakeData: withdrawStakeData,
+        remainingAccounts: withdrawRemainingAccounts,
+      } = await prepareStakeReadOnly(this.rpc, this.accounts.stake, this.stakingProgram.programId, this.coder);
+
+      await this.stakingProgram.methods
+        .withdraw(withdrawProof, withdrawStakeAccountMeta, withdrawStakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(withdrawRemainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .rpc();
 
       const balanceAfter = await getTokenBalance(this.provider, this.accounts.user);
       expect(balanceAfter).to.be.greaterThan(this.userBalanceBefore);
 
-      const stake = await this.stakingProgram.account.stakeAccount.fetch(this.accounts.stake);
+      const stake = await fetchCompressedStake(this.rpc, this.accounts.stake, this.coder);
       expect(stake.amount.toNumber()).to.equal(this.balances.vaultStaking);
       expect(stake.amount.toNumber()).to.equal(this.constants.stakeMinimum + this.constants.stakeAmount);
       expect(stake.duration.toNumber()).to.equal(duration, 'duration');
@@ -343,12 +692,28 @@ export default function suite() {
     it('can withdraw a second time', async function () {
       const seconds = 10; // increase this number get a higher test reliability
       const duration = this.constants.stakeDurationMin * 2 + 7;
-      const amount = (await this.stakingProgram.account.stakeAccount.fetch(this.accounts.stake)).amount.toNumber();
+      const stakeDataBefore = await fetchCompressedStake(this.rpc, this.accounts.stake, this.coder);
+      const amount = stakeDataBefore.amount.toNumber();
       const emission = amount / duration;
       const expectedWithdraw = Math.floor(emission * seconds);
 
       await sleep(seconds);
-      await this.stakingProgram.methods.withdraw().accounts(this.accounts).rpc();
+
+      // Prepare withdraw operation (read-only)
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      await this.stakingProgram.methods
+        .withdraw(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .rpc();
 
       const balanceAfter = await getTokenBalance(this.provider, this.accounts.user);
       expect(balanceAfter).to.be.greaterThan(this.userBalanceBefore);
@@ -361,9 +726,23 @@ export default function suite() {
     });
 
     it('can restake', async function () {
-      await this.stakingProgram.methods.restake().accounts(this.accounts).rpc();
+      // Prepare restake operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
 
-      const amountStake = (await this.stakingProgram.account.stakeAccount.fetch(this.accounts.stake)).amount.toNumber();
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      await this.stakingProgram.methods
+        .restake(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .rpc();
+
+      const amountStake = (await fetchCompressedStake(this.rpc, this.accounts.stake, this.coder)).amount.toNumber();
       const amountVault = await getTokenBalance(this.provider, this.accounts.vault);
       expect(amountStake).to.equal(amountVault);
     });
@@ -373,27 +752,50 @@ export default function suite() {
   // which is only available in CI environment. Run in CI for full test coverage.
   describe.skip('slash(), update_authority()', async function () {
     it('can slash', async function () {
-      const stakeBefore = await this.stakingProgram.account.stakeAccount.fetch(this.users.nodes[2].stake);
+      const stakeBefore = await fetchCompressedStake(this.rpc, this.users.nodes[2].stake, this.coder);
 
+      // Prepare slash operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.users.nodes[2].stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .slash(new anchor.BN(this.constants.slashAmount))
+        .slash(new anchor.BN(this.constants.slashAmount), proof, stakeAccountMeta, stakeData)
         .accounts({
           ...this.accounts,
-          stake: this.users.nodes[2].stake,
           vault: this.users.nodes[2].vault,
         })
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .rpc();
 
       this.balances.user += this.constants.slashAmount;
-      const stakeAfter = await this.stakingProgram.account.stakeAccount.fetch(this.users.nodes[2].stake);
+      const stakeAfter = await fetchCompressedStake(this.rpc, this.users.nodes[2].stake, this.coder);
       expect(stakeAfter.amount.toNumber()).to.equal(stakeBefore.amount.toNumber() - this.constants.slashAmount);
     });
 
     it('can not slash unauthorized', async function () {
       let msg = '';
+
+      // Prepare slash operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.users.nodes[2].stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .slash(new anchor.BN(this.constants.slashAmount))
-        .accounts({ ...this.accounts, authority: this.users.node1.publicKey })
+        .slash(new anchor.BN(this.constants.slashAmount), proof, stakeAccountMeta, stakeData)
+        .accounts({
+          ...this.accounts, authority: this.users.node1.publicKey } as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([this.users.node1.user])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
@@ -402,9 +804,22 @@ export default function suite() {
 
     it('can not slash unauthorized hack 2', async function () {
       let msg = '';
+
+      // Prepare slash operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.users.nodes[2].stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .slash(new anchor.BN(this.constants.slashAmount))
-        .accounts({ ...this.accounts, settings: this.accounts.stake })
+        .slash(new anchor.BN(this.constants.slashAmount), proof, stakeAccountMeta, stakeData)
+        .accounts({
+          ...this.accounts, settings: this.accounts.stake } as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.Solana8ByteConstraint);
@@ -413,21 +828,32 @@ export default function suite() {
     it('can update slash authority', async function () {
       await this.stakingProgram.methods
         .updateSettings()
-        .accounts({ ...this.accounts, newAuthority: this.users.node1.publicKey })
+        .accounts({
+          ...this.accounts, newAuthority: this.users.node1.publicKey } as Accounts)
         .rpc();
       const stats = await this.stakingProgram.account.settingsAccount.fetch(this.accounts.settings);
       expect(stats.authority.toString()).to.equal(this.users.node1.publicKey.toString());
     });
 
     it('can slash with node 1', async function () {
+      // Prepare slash operation
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+        this.rpc,
+        this.users.nodes[2].stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.stakingProgram.methods
-        .slash(new anchor.BN(this.constants.slashAmount))
+        .slash(new anchor.BN(this.constants.slashAmount), proof, stakeAccountMeta, stakeData)
         .accounts({
           ...this.accounts,
-          stake: this.users.nodes[2].stake,
           authority: this.users.node1.publicKey,
           vault: this.users.nodes[2].vault,
-        })
+        } as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([this.users.node1.user])
         .rpc();
 
@@ -441,7 +867,7 @@ export default function suite() {
           ...this.accounts,
           authority: this.users.node1.publicKey,
           newAuthority: this.accounts.authority,
-        })
+        } as Accounts)
         .signers([this.users.node1.user])
         .rpc();
       const stats = await this.stakingProgram.account.settingsAccount.fetch(this.accounts.settings);

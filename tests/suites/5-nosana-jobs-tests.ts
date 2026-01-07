@@ -1,9 +1,13 @@
 import * as anchor from '@coral-xyz/anchor';
+import { web3 } from '@coral-xyz/anchor';
 import { expect } from 'chai';
-import { buf2hex, getTimestamp, getTokenBalance, pda, sleep } from '../utils';
+import { buf2hex, getTimestamp, getTokenBalance, pda, sleep, prepareStakeReadOnly } from '../utils';
 import { BN } from '@coral-xyz/anchor';
 import { Context, describe } from 'mocha';
 import { createAssociatedTokenAccount, getAssociatedTokenAddress, transfer } from '@solana/spl-token';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Accounts = any;
 
 /**
  * Helper to set the job accounts and seeds
@@ -64,7 +68,7 @@ export default function suite() {
           this.market.jobType,
           new BN(this.market.nodeStakeMinimum),
         )
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .signers([marketKey])
         .rpc();
     });
@@ -74,15 +78,24 @@ export default function suite() {
     it('add node1 to market queue', async function () {
       const key = getRunKey(this);
 
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        this.users.node1.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.jobsProgram.methods
-        .work()
+        .work(proof, stakeAccountMeta, stakeData)
         .accounts({
           ...this.accounts,
           stake: this.users.node1.stake,
           nft: this.users.node1.ataNft,
           metadata: this.users.node1.metadata,
           authority: this.users.node1.publicKey,
-        })
+        } as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([key, this.users.node1.user])
         .rpc();
 
@@ -98,7 +111,7 @@ export default function suite() {
       const runKey = getRunKey(this);
       await this.jobsProgram.methods
         .assign(this.constants.ipfsData, new BN(this.constants.jobTimeout))
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .signers([jobKey, runKey])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
@@ -111,7 +124,20 @@ export default function suite() {
     it('add a second node to the market queue', async function () {
       const key = getRunKey(this);
 
-      await this.jobsProgram.methods.work().accounts(this.accounts).signers([key]).rpc();
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      await this.jobsProgram.methods
+        .work(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .signers([key])
+        .rpc();
 
       this.market.queueLength += 1;
       this.market.queueType = this.constants.queueType.node;
@@ -125,7 +151,7 @@ export default function suite() {
 
       await this.jobsProgram.methods
         .assign(this.constants.ipfsData, new BN(this.constants.jobTimeout))
-        .accounts({ ...this.accounts, node: this.accounts.authority })
+        .accounts({ ...this.accounts as Accounts, node: this.accounts.authority })
         .signers([jobKey, runKey])
         .rpc();
 
@@ -142,7 +168,7 @@ export default function suite() {
 
   describe('finish', async function () {
     it('can finish the last job in the market', async function () {
-      await this.jobsProgram.methods.finish(this.constants.ipfsData).accounts(this.accounts).rpc();
+      await this.jobsProgram.methods.finish(this.constants.ipfsData).accounts(this.accounts as Accounts).rpc();
       const deposit = this.constants.jobPrice * this.constants.jobTimeout;
       this.balances.user += deposit;
       this.balances.vaultJob -= deposit;
@@ -173,7 +199,7 @@ export default function suite() {
       const runKey = getRunKey(this);
       await this.jobsProgram.methods
         .list(this.constants.ipfsData, new BN(this.constants.jobTimeout))
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .signers([jobKey, runKey])
         .rpc();
 
@@ -202,7 +228,7 @@ export default function suite() {
       let msg = '';
       await this.jobsProgram.methods
         .delist()
-        .accounts({ ...this.accounts, authority: this.users.user2.publicKey })
+        .accounts({ ...this.accounts as Accounts, authority: this.users.user2.publicKey })
         .signers([this.users.user2.user])
         .rpc()
         .catch((err) => (msg = err.error.errorMessage));
@@ -215,11 +241,24 @@ export default function suite() {
       runKey = getRunKey(this);
 
       // Pick up only job in queue to change market state to empty
-      await this.jobsProgram.methods.work().accounts(this.accounts).signers([runKey]).rpc();
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      await this.jobsProgram.methods
+        .work(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .signers([runKey])
+        .rpc();
 
       await this.jobsProgram.methods
         .delist()
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .rpc()
         .catch((err) => (msg = err.error.errorMessage));
 
@@ -241,7 +280,7 @@ export default function suite() {
 
       await this.jobsProgram.methods
         .list(this.constants.ipfsData, new BN(this.constants.jobTimeout))
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .signers([jobKey, runKey])
         .rpc();
 
@@ -249,7 +288,7 @@ export default function suite() {
 
       await this.jobsProgram.methods
         .delist()
-        .accounts({ ...this.accounts, job: listedJobAccount[0] })
+        .accounts({ ...this.accounts as Accounts, job: listedJobAccount[0] })
         .rpc()
         .catch((err) => (msg = err.error.errorMessage));
 
@@ -271,12 +310,12 @@ export default function suite() {
       // Complete job to change job state
       await this.jobsProgram.methods
         .finish(this.constants.ipfsData)
-        .accounts({ ...this.accounts, job: listedJobAccount[0], run: runKey.publicKey })
+        .accounts({ ...this.accounts as Accounts, job: listedJobAccount[0], run: runKey.publicKey })
         .rpc();
 
       await this.jobsProgram.methods
         .delist()
-        .accounts({ ...this.accounts, job: listedJobAccount[0] })
+        .accounts({ ...this.accounts as Accounts, job: listedJobAccount[0] })
         .rpc()
         .catch((err) => (msg = err.error.errorMessage));
 
@@ -288,7 +327,7 @@ export default function suite() {
     });
 
     it('can close job account, refund payer and remove job from the market', async function () {
-      await this.jobsProgram.methods.delist().accounts(this.accounts).rpc();
+      await this.jobsProgram.methods.delist().accounts(this.accounts as Accounts).rpc();
 
       let msg = '';
       await this.jobsProgram.account.jobAccount
@@ -313,7 +352,7 @@ export default function suite() {
       const runKey = getRunKey(this);
       await this.jobsProgram.methods
         .list(this.constants.ipfsData, new BN(this.constants.jobTimeout))
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .signers([jobKey, runKey])
         .rpc();
 
@@ -339,7 +378,7 @@ export default function suite() {
       let error;
       await this.jobsProgram.methods
         .end()
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .rpc()
         .catch((err) => (error = err.error));
 
@@ -352,7 +391,20 @@ export default function suite() {
     it('can work on job, with a new run key', async function () {
       const key = getRunKey(this);
 
-      await this.jobsProgram.methods.work().accounts(this.accounts).signers([key]).rpc();
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      await this.jobsProgram.methods
+        .work(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .signers([key])
+        .rpc();
 
       this.market.queueLength -= 1;
       this.market.queueType = this.constants.queueType.unknown;
@@ -365,7 +417,7 @@ export default function suite() {
 
       await this.jobsProgram.methods
         .complete(this.constants.ipfsData)
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .rpc()
         .catch((err) => (msg = err.error.errorMessage));
 
@@ -378,7 +430,7 @@ export default function suite() {
       let msg = '';
       await this.jobsProgram.methods
         .end()
-        .accounts({ ...this.accounts, authority: this.users.user2.publicKey })
+        .accounts({ ...this.accounts as Accounts, authority: this.users.user2.publicKey })
         .signers([this.users.user2.user])
         .rpc()
         .catch((err) => (msg = err.error.errorMessage));
@@ -387,7 +439,7 @@ export default function suite() {
     });
 
     it('can end a running job', async function () {
-      await this.jobsProgram.methods.end().accounts(this.accounts).rpc();
+      await this.jobsProgram.methods.end().accounts(this.accounts as Accounts).rpc();
 
       const job = await this.jobsProgram.account.jobAccount.fetch(this.accounts.job);
 
@@ -412,7 +464,7 @@ export default function suite() {
 
       await this.jobsProgram.methods
         .complete(this.constants.ipfsData)
-        .accounts({ ...this.accounts, authority: this.users.user2.publicKey })
+        .accounts({ ...this.accounts as Accounts, authority: this.users.user2.publicKey })
         .signers([this.users.user2.user])
         .rpc()
         .catch((err) => (msg = err.error.errorMessage));
@@ -425,7 +477,7 @@ export default function suite() {
 
       await this.jobsProgram.methods
         .complete(this.constants.ipfsData)
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .rpc()
         .catch((err) => console.error(err));
 
@@ -442,7 +494,7 @@ export default function suite() {
       const runKey = getRunKey(this);
       await this.jobsProgram.methods
         .list(this.constants.ipfsData, new BN(this.constants.jobTimeout))
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .signers([jobKey, runKey])
         .rpc();
 
@@ -467,7 +519,7 @@ export default function suite() {
     it('can extend and topup job timeout', async function () {
       await this.jobsProgram.methods
         .extend(new BN(this.constants.jobTimeout + this.constants.jobExtendTimeout))
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .rpc();
 
       // update balances
@@ -480,7 +532,7 @@ export default function suite() {
       let msg = '';
       await this.jobsProgram.methods
         .extend(new BN(this.constants.jobTimeout - this.constants.jobExtendTimeout))
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
 
@@ -494,7 +546,20 @@ export default function suite() {
 
       this.market.usedKey = key; // remember for later
 
-      await this.jobsProgram.methods.work().accounts(this.accounts).signers([key]).rpc();
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      await this.jobsProgram.methods
+        .work(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .signers([key])
+        .rpc();
 
       this.market.queueLength -= 1;
       this.market.queueType = this.constants.queueType.unknown;
@@ -531,9 +596,18 @@ export default function suite() {
       // work
       let msg = '';
       const key = getRunKey(this);
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.jobsProgram.methods
-        .work()
-        .accounts(this.accounts)
+        .work(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([key])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
@@ -547,7 +621,20 @@ export default function suite() {
 
       // work
       const key = getRunKey(this);
-      await this.jobsProgram.methods.work().accounts(this.accounts).signers([key]).rpc();
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      await this.jobsProgram.methods
+        .work(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .signers([key])
+        .rpc();
 
       // update market
       this.market.queueType = this.constants.queueType.node;
@@ -557,9 +644,18 @@ export default function suite() {
     it('can not work and enter the market queue twice', async function () {
       let msg = '';
       const key = getRunKey(this);
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.jobsProgram.methods
-        .work()
-        .accounts(this.accounts)
+        .work(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([key])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
@@ -578,7 +674,7 @@ export default function suite() {
       const jobKey = getNewJobKey(this);
       await this.jobsProgram.methods
         .list(this.constants.ipfsData, new BN(this.constants.jobTimeout))
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .signers([jobKey, runKey])
         .rpc();
 
@@ -622,14 +718,14 @@ export default function suite() {
       let msg = '';
       await this.jobsProgram.methods
         .finish(this.constants.ipfsNull)
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.JobResultNull);
     });
 
     it('can finish a job as a node', async function () {
-      await this.jobsProgram.methods.finish(this.constants.ipfsData).accounts(this.accounts).rpc();
+      await this.jobsProgram.methods.finish(this.constants.ipfsData).accounts(this.accounts as Accounts).rpc();
       const deposit = this.constants.jobPrice * this.constants.jobTimeout;
       this.balances.user += deposit;
       this.balances.vaultJob -= deposit;
@@ -639,7 +735,7 @@ export default function suite() {
       let msg = '';
       await this.jobsProgram.methods
         .finish(this.constants.ipfsData)
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.SolanaAccountNotInitialized);
@@ -657,7 +753,7 @@ export default function suite() {
 
       await this.jobsProgram.methods
         .complete(this.constants.ipfsData)
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .rpc()
         .catch((err) => (msg = err.error.errorMessage));
 
@@ -686,7 +782,7 @@ export default function suite() {
       let msg = '';
       await this.jobsProgram.methods
         .recover()
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.JobInWrongState);
@@ -696,7 +792,7 @@ export default function suite() {
       let msg = '';
       await this.jobsProgram.methods
         .clean()
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.JobInWrongState);
@@ -705,9 +801,18 @@ export default function suite() {
     it('can not claim job that is running', async function () {
       let msg = '';
       const runKey = getRunKey(this);
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.jobsProgram.methods
-        .claim()
-        .accounts(this.accounts)
+        .claim(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([runKey])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
@@ -732,7 +837,7 @@ export default function suite() {
       let msg = '';
       await this.jobsProgram.methods
         .clean()
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.JobNotExpired);
@@ -751,7 +856,7 @@ export default function suite() {
 
       // wait and clean
       await sleep(Math.abs(now - expired));
-      await this.jobsProgram.methods.clean().accounts(this.accounts).rpc();
+      await this.jobsProgram.methods.clean().accounts(this.accounts as Accounts).rpc();
     });
   });
 
@@ -761,7 +866,7 @@ export default function suite() {
       const jobKey = getNewJobKey(this);
       await this.jobsProgram.methods
         .list(this.constants.ipfsData, new BN(this.constants.jobTimeout))
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .signers([jobKey, runKey])
         .rpc();
 
@@ -777,7 +882,20 @@ export default function suite() {
 
     it('can start working on it', async function () {
       const key = getRunKey(this);
-      await this.jobsProgram.methods.work().accounts(this.accounts).signers([key]).rpc();
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      await this.jobsProgram.methods
+        .work(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .signers([key])
+        .rpc();
 
       // update market
       this.market.queueType = this.constants.queueType.unknown;
@@ -799,7 +917,7 @@ export default function suite() {
     });
 
     it('can quit a job', async function () {
-      await this.jobsProgram.methods.quit().accounts(this.accounts).rpc();
+      await this.jobsProgram.methods.quit().accounts(this.accounts as Accounts).rpc();
     });
 
     it('can find a quited job', async function () {
@@ -813,14 +931,23 @@ export default function suite() {
       let msg = '';
       const user = this.users.node1;
       const runKey = getRunKey(this);
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        user.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.jobsProgram.methods
-        .claim()
+        .claim(proof, stakeAccountMeta, stakeData)
         .accounts({
           ...this.accounts,
           authority: user.publicKey,
           nft: user.ataNft,
           stake: user.stake,
-        })
+        } as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([runKey, user.user])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
@@ -831,14 +958,24 @@ export default function suite() {
       let msg = '';
       const user = this.users.node1;
       const runKey = getRunKey(this);
+      // Use main wallet stake, not node1's stake
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.jobsProgram.methods
-        .claim()
+        .claim(proof, stakeAccountMeta, stakeData)
         .accounts({
           ...this.accounts,
           authority: user.publicKey,
           metadata: user.metadata,
           nft: user.ataNft,
         })
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([runKey, user.user])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
@@ -849,14 +986,23 @@ export default function suite() {
       let msg = '';
       const user = this.users.node1;
       const runKey = getRunKey(this);
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        user.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.jobsProgram.methods
-        .claim()
+        .claim(proof, stakeAccountMeta, stakeData)
         .accounts({
           ...this.accounts,
           authority: user.publicKey,
           metadata: user.metadata,
           stake: user.stake,
-        })
+        } as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([runKey, user.user])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
@@ -866,15 +1012,24 @@ export default function suite() {
     it('can claim a stopped job with another node', async function () {
       const user = this.users.node1;
       const runKey = getRunKey(this);
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        user.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.jobsProgram.methods
-        .claim()
+        .claim(proof, stakeAccountMeta, stakeData)
         .accounts({
           ...this.accounts,
           authority: user.publicKey,
           nft: user.ataNft,
           metadata: user.metadata,
           stake: user.stake,
-        })
+        } as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([runKey, user.user])
         .rpc();
     });
@@ -898,7 +1053,7 @@ export default function suite() {
       let msg = '';
       await this.jobsProgram.methods
         .quit()
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.Unauthorized);
@@ -938,7 +1093,20 @@ export default function suite() {
     it('can work on job, with a new run key', async function () {
       const key = getRunKey(this);
 
-      await this.jobsProgram.methods.work().accounts(this.accounts).signers([key]).rpc();
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        this.accounts.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      await this.jobsProgram.methods
+        .work(proof, stakeAccountMeta, stakeData)
+        .accounts(this.accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .signers([key])
+        .rpc();
 
       this.market.queueLength += 1;
       this.market.queueType = this.constants.queueType.node;
@@ -981,15 +1149,24 @@ export default function suite() {
       const key = getRunKey(this);
 
       // work
+      const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+        this.rpc,
+        node.stake,
+        this.stakingProgram.programId,
+        this.coder,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
       await this.jobsProgram.methods
-        .work()
+        .work(proof, stakeAccountMeta, stakeData)
         .accounts({
           ...this.accounts,
           stake: node.stake,
           nft: node.ataNft,
           metadata: node.metadata,
           authority: node.publicKey,
-        })
+        } as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([key, node.user])
         .rpc();
 
@@ -1042,7 +1219,7 @@ export default function suite() {
     });
 
     it('can recover a stopped job', async function () {
-      await this.jobsProgram.methods.recover().accounts(this.accounts).rpc();
+      await this.jobsProgram.methods.recover().accounts(this.accounts as Accounts).rpc();
       const deposit = this.constants.jobPrice * this.constants.jobTimeout;
       this.balances.user += deposit;
       this.balances.vaultJob -= deposit;
@@ -1113,7 +1290,7 @@ export default function suite() {
             payer: this.users.user2.publicKey,
             deposit: this.users.user2.ata,
             authority: this.users.user2.publicKey,
-          })
+          } as Accounts)
           .signers([this.users.user2.user])
           .rpc()
           .catch((err) => (msg = err.error.errorMessage));
@@ -1127,7 +1304,7 @@ export default function suite() {
             ...this.accounts,
             payer: this.users.user2.publicKey,
             deposit: this.users.user2.ata,
-          })
+          } as Accounts)
           .rpc();
 
         // verify user2 gets refunded (as the payer)
@@ -1192,7 +1369,20 @@ export default function suite() {
 
       it('can work on extended job and finish it', async function () {
         const workKey = getRunKey(this);
-        await this.jobsProgram.methods.work().accounts(this.accounts).signers([workKey]).rpc();
+        const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+          this.rpc,
+          this.accounts.stake,
+          this.stakingProgram.programId,
+          this.coder,
+        );
+        const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+        await this.jobsProgram.methods
+          .work(proof, stakeAccountMeta, stakeData)
+          .accounts(this.accounts as Accounts)
+          .remainingAccounts(remainingAccounts)
+          .preInstructions([computeBudgetIx])
+          .signers([workKey])
+          .rpc();
 
         // update market
         this.market.queueLength -= 1;
@@ -1246,7 +1436,7 @@ export default function suite() {
       let msg = '';
       await this.jobsProgram.methods
         .close()
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
       expect(msg).to.equal(this.constants.errors.VaultNotEmpty);
@@ -1281,7 +1471,7 @@ export default function suite() {
     });
 
     it('can finish the last job in the market', async function () {
-      await this.jobsProgram.methods.finish(this.constants.ipfsData).accounts(this.accounts).rpc();
+      await this.jobsProgram.methods.finish(this.constants.ipfsData).accounts(this.accounts as Accounts).rpc();
       const deposit = this.constants.jobPrice * (this.constants.jobTimeout + this.constants.jobExtendTimeout);
       this.balances.user += deposit;
       this.balances.vaultJob -= deposit;
@@ -1301,7 +1491,7 @@ export default function suite() {
         .accounts({
           ...this.accounts,
           authority: user.publicKey,
-        })
+        } as Accounts)
         .signers([user.user])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
@@ -1309,7 +1499,7 @@ export default function suite() {
     });
 
     it('can close the market', async function () {
-      await this.jobsProgram.methods.close().accounts(this.accounts).rpc();
+      await this.jobsProgram.methods.close().accounts(this.accounts as Accounts).rpc();
       this.exists.market = false;
     });
   });
@@ -1337,7 +1527,7 @@ export default function suite() {
           this.market.jobType,
           new BN(this.market.nodeStakeMinimum),
         )
-        .accounts(this.accounts)
+        .accounts(this.accounts as Accounts)
         .signers([marketKey])
         .rpc();
     });
@@ -1350,7 +1540,7 @@ export default function suite() {
         .accounts({
           ...this.accounts,
           authority: user.publicKey,
-        })
+        } as Accounts)
         .signers([user.user])
         .rpc()
         .catch((e) => (msg = e.error.errorMessage));
@@ -1358,7 +1548,7 @@ export default function suite() {
     });
 
     it('can close the market as admin', async function () {
-      await this.jobsProgram.methods.closeAdmin().accounts(this.accounts).rpc();
+      await this.jobsProgram.methods.closeAdmin().accounts(this.accounts as Accounts).rpc();
       this.exists.market = false;
     });
   });

@@ -12,6 +12,23 @@ import MintKey = require('./keys/devr1BGQndEW5k5zfvG5FsLyZv1Ap73vNgAHcQ9sUVP.jso
 import DummyKey = require('./keys/dumQVNHZ1KNcLmzjMaDPEA5vFCzwHEEcQmZ8JHmmCNH.json');
 import _ = require('lodash');
 
+// Light Protocol imports
+import {
+  bn,
+  CompressedAccountWithMerkleContext,
+  createRpc,
+  defaultTestStateTreeAccounts,
+  deriveAddress,
+  deriveAddressSeed,
+  PackedAccounts,
+  Rpc,
+  SystemAccountMetaConfig,
+} from '@lightprotocol/stateless.js';
+
+// Custom address tree for nosana stake accounts (must match program's ALLOWED_ADDRESS_TREE)
+const NOSANA_ADDRESS_TREE = new PublicKey('amt2kaJA14v3urZbZvnc5v2np8jqvc4Z8zDep5wbtzx');
+const NOSANA_ADDRESS_QUEUE = new PublicKey('amt2kaJA14v3urZbZvnc5v2np8jqvc4Z8zDep5wbtzx');
+
 /**
  *
  * @param address
@@ -174,7 +191,7 @@ async function ask(question): Promise<boolean> {
 /**
  *
  * @param mochaContext
- * @param stakePubkey
+ * @param stakePubkey - compressed stake account address
  * @param fee
  * @param reflection
  */
@@ -184,7 +201,11 @@ async function updateRewards(
   fee = new anchor.BN(0),
   reflection = new anchor.BN(0),
 ) {
-  const stake = await mochaContext.stakingProgram.account.stakeAccount.fetch(stakePubkey);
+  // Fetch stake from compressed account
+  const stake = await fetchCompressedStake(mochaContext.rpc, stakePubkey, mochaContext.coder);
+  if (!stake) {
+    throw new Error('Compressed stake account not found in updateRewards');
+  }
   const stats = await mochaContext.rewardsProgram.account.reflectionAccount.fetch(mochaContext.accounts.reflection);
 
   let amount = 0;
@@ -247,10 +268,8 @@ async function setupSolanaUser(mochaContext: Context) {
     balance: mochaContext.constants.userSupply,
     // pdas
     project: await pda([utf8.encode('project'), publicKey.toBuffer()], mochaContext.jobsProgram.programId),
-    stake: await pda(
-      [utf8.encode('stake'), mochaContext.mint.toBuffer(), publicKey.toBuffer()],
-      mochaContext.stakingProgram.programId,
-    ),
+    // stake is now a compressed account address, not a PDA
+    stake: deriveStakeAddress(mochaContext.mint, publicKey, mochaContext.stakingProgram.programId),
     reward: await pda([utf8.encode('reward'), publicKey.toBuffer()], mochaContext.rewardsProgram.programId),
     vault: await pda(
       [utf8.encode('vault'), mochaContext.mint.toBuffer(), publicKey.toBuffer()],
@@ -269,6 +288,192 @@ async function getUsers(mochaContext: Context, amount: number) {
       return await setupSolanaUser(mochaContext);
     }),
   );
+}
+
+// ============================================================================
+// Light Protocol Utilities for Compressed Stake Accounts
+// ============================================================================
+
+/**
+ * Create Light Protocol RPC client for local test validator
+ */
+function createLightRpc(): Rpc {
+  return createRpc('http://127.0.0.1:8899', 'http://127.0.0.1:8784', 'http://127.0.0.1:3001', {
+    commitment: 'confirmed',
+  });
+}
+
+/**
+ * Derive compressed stake account address
+ */
+function deriveStakeAddress(mint: PublicKey, authority: PublicKey, programId: PublicKey): PublicKey {
+  const seed = deriveAddressSeed([Buffer.from('stake'), mint.toBuffer(), authority.toBuffer()], programId);
+  return deriveAddress(seed, NOSANA_ADDRESS_TREE);
+}
+
+/**
+ * Prepare proof and accounts for creating a new compressed stake account
+ */
+async function prepareStakeCreate(rpc: Rpc, stakeAddress: PublicKey, programId: PublicKey) {
+  const { merkleTree } = defaultTestStateTreeAccounts();
+
+  const proofRpcResult = await rpc.getValidityProofV0(
+    [],
+    [
+      {
+        tree: NOSANA_ADDRESS_TREE,
+        queue: NOSANA_ADDRESS_QUEUE,
+        address: bn(stakeAddress.toBytes()),
+      },
+    ],
+  );
+
+  const systemAccountConfig = SystemAccountMetaConfig.new(programId);
+  const remainingAccounts = PackedAccounts.newWithSystemAccounts(systemAccountConfig);
+
+  const addressMerkleTreePubkeyIndex = remainingAccounts.insertOrGet(NOSANA_ADDRESS_TREE);
+  const addressQueuePubkeyIndex = remainingAccounts.insertOrGet(NOSANA_ADDRESS_QUEUE);
+  const outputMerkleTreeIndex = remainingAccounts.insertOrGet(merkleTree);
+
+  const proof = { 0: proofRpcResult.compressedProof };
+  const addressTreeInfo = {
+    addressMerkleTreePubkeyIndex,
+    addressQueuePubkeyIndex,
+    rootIndex: proofRpcResult.rootIndices[0],
+  };
+
+  return {
+    proof,
+    addressTreeInfo,
+    outputStateTreeIndex: outputMerkleTreeIndex,
+    remainingAccounts: remainingAccounts.toAccountMetas().remainingAccounts,
+  };
+}
+
+/**
+ * Prepare proof and accounts for operating on an existing compressed stake account
+ */
+async function prepareStakeOperation(
+  rpc: Rpc,
+  stakeAddress: PublicKey,
+  programId: PublicKey,
+  coder: anchor.BorshCoder,
+) {
+  const { merkleTree } = defaultTestStateTreeAccounts();
+
+  // Fetch the compressed account
+  const compressedAccount = await rpc.getCompressedAccount(bn(stakeAddress.toBytes()));
+  if (!compressedAccount || !compressedAccount.data || compressedAccount.data.data.length === 0) {
+    throw new Error('Compressed stake account not found');
+  }
+
+  // Decode the stake data
+  const stakeData = coder.types.decode('CompressedStakeAccount', Buffer.from(compressedAccount.data.data));
+
+  // Get validity proof
+  const proofRpcResult = await rpc.getValidityProofV0(
+    [
+      {
+        hash: compressedAccount.hash,
+        tree: compressedAccount.treeInfo.tree,
+        queue: compressedAccount.treeInfo.queue,
+      },
+    ],
+    [],
+  );
+
+  const systemAccountConfig = SystemAccountMetaConfig.new(programId);
+  const remainingAccounts = PackedAccounts.newWithSystemAccounts(systemAccountConfig);
+
+  const merkleTreePubkeyIndex = remainingAccounts.insertOrGet(compressedAccount.treeInfo.tree);
+  const queuePubkeyIndex = remainingAccounts.insertOrGet(compressedAccount.treeInfo.queue);
+  const outputMerkleTreeIndex = remainingAccounts.insertOrGet(merkleTree);
+
+  const proof = { 0: proofRpcResult.compressedProof };
+  const stakeAccountMeta = {
+    treeInfo: {
+      rootIndex: proofRpcResult.rootIndices[0],
+      proveByIndex: false,
+      merkleTreePubkeyIndex,
+      queuePubkeyIndex,
+      leafIndex: compressedAccount.leafIndex,
+    },
+    address: Array.from(stakeAddress.toBytes()),
+    outputStateTreeIndex: outputMerkleTreeIndex,
+  };
+
+  return {
+    proof,
+    stakeAccountMeta,
+    stakeData,
+    remainingAccounts: remainingAccounts.toAccountMetas().remainingAccounts,
+    compressedAccount,
+  };
+}
+
+/**
+ * Prepare proof and accounts for read-only operations (withdraw)
+ */
+async function prepareStakeReadOnly(rpc: Rpc, stakeAddress: PublicKey, programId: PublicKey, coder: anchor.BorshCoder) {
+  // Fetch the compressed account
+  const compressedAccount = await rpc.getCompressedAccount(bn(stakeAddress.toBytes()));
+  if (!compressedAccount || !compressedAccount.data || compressedAccount.data.data.length === 0) {
+    throw new Error('Compressed stake account not found');
+  }
+
+  // Decode the stake data
+  const stakeData = coder.types.decode('CompressedStakeAccount', Buffer.from(compressedAccount.data.data));
+
+  // Get validity proof
+  const proofRpcResult = await rpc.getValidityProofV0(
+    [
+      {
+        hash: compressedAccount.hash,
+        tree: compressedAccount.treeInfo.tree,
+        queue: compressedAccount.treeInfo.queue,
+      },
+    ],
+    [],
+  );
+
+  const systemAccountConfig = SystemAccountMetaConfig.new(programId);
+  const remainingAccounts = PackedAccounts.newWithSystemAccounts(systemAccountConfig);
+
+  const merkleTreePubkeyIndex = remainingAccounts.insertOrGet(compressedAccount.treeInfo.tree);
+  const queuePubkeyIndex = remainingAccounts.insertOrGet(compressedAccount.treeInfo.queue);
+
+  const proof = { 0: proofRpcResult.compressedProof };
+  const stakeAccountMeta = {
+    treeInfo: {
+      rootIndex: proofRpcResult.rootIndices[0],
+      proveByIndex: false,
+      merkleTreePubkeyIndex,
+      queuePubkeyIndex,
+      leafIndex: compressedAccount.leafIndex,
+    },
+    address: Array.from(stakeAddress.toBytes()),
+  };
+
+  return {
+    proof,
+    stakeAccountMeta,
+    stakeData,
+    remainingAccounts: remainingAccounts.toAccountMetas().remainingAccounts,
+    compressedAccount,
+  };
+}
+
+/**
+ * Fetch and decode a compressed stake account
+ */
+async function fetchCompressedStake(rpc: Rpc, stakeAddress: PublicKey, coder: anchor.BorshCoder) {
+  const compressedAccount = await rpc.getCompressedAccount(bn(stakeAddress.toBytes()));
+  if (!compressedAccount || !compressedAccount.data || compressedAccount.data.data.length === 0) {
+    return null;
+  }
+
+  const stakeData = coder.types.decode('CompressedStakeAccount', Buffer.from(compressedAccount.data.data));
+  return stakeData;
 }
 
 export {
@@ -290,4 +495,11 @@ export {
   updateRewards,
   mapUsers,
   mintNosTo,
+  // Light Protocol utilities
+  createLightRpc,
+  deriveStakeAddress,
+  prepareStakeCreate,
+  prepareStakeOperation,
+  prepareStakeReadOnly,
+  fetchCompressedStake,
 };
