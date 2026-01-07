@@ -63,6 +63,9 @@ impl<'info> Stake<'info> {
             crate::LIGHT_CPI_SIGNER,
         );
 
+        // Verify the address tree is the allowed one for stake accounts
+        crate::verify_address_tree(&light_cpi_accounts, &address_tree_info)?;
+
         // Derive the compressed account address
         let (address, address_seed) = derive_address(
             &[

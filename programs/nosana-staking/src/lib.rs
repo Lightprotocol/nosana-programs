@@ -7,7 +7,10 @@ mod state;
 use anchor_lang::prelude::*;
 pub use errors::*; // expose errors for cpi
 use instructions::*;
-use light_sdk::{cpi::CpiSigner, derive_light_cpi_signer};
+use light_sdk::{
+    cpi::{v2::CpiAccounts, CpiSigner},
+    derive_light_cpi_signer,
+};
 use nosana_common::*;
 pub use state::*; // expose stake for cpi
 
@@ -17,6 +20,32 @@ declare_id!(id::STAKING_PROGRAM);
 /// Derived from the staking program ID: nosScmHY2uR24Zh751PmGj9ww9QRNHewh9H59AfrTJE
 pub const LIGHT_CPI_SIGNER: CpiSigner =
     derive_light_cpi_signer!("nosScmHY2uR24Zh751PmGj9ww9QRNHewh9H59AfrTJE");
+
+/// Allowed address tree for compressed stake accounts.
+/// This ensures all stake accounts are created in the same address tree
+/// to guarantee compressed PDA uniqueness.
+#[constant]
+pub const ALLOWED_ADDRESS_TREE: Pubkey =
+    pubkey!("amt2kaJA14v3urZbZvnc5v2np8jqvc4Z8zDep5wbtzx");
+
+/// Verify that the address tree used for compressed account creation is the allowed one.
+/// This check ensures compressed PDA uniqueness by requiring all stake accounts
+/// to be created in the same address tree.
+pub fn verify_address_tree(
+    light_cpi_accounts: &CpiAccounts,
+    address_tree_info: &light_sdk::instruction::PackedAddressTreeInfo,
+) -> Result<Pubkey> {
+    let address_tree = address_tree_info
+        .get_tree_pubkey(light_cpi_accounts)
+        .map_err(|_| NosanaError::InvalidAccount)?;
+
+    require!(
+        address_tree == ALLOWED_ADDRESS_TREE,
+        NosanaStakingError::InvalidAddressTree
+    );
+
+    Ok(address_tree)
+}
 
 #[program]
 pub mod nosana_staking {
