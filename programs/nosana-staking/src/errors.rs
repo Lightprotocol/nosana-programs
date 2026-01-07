@@ -32,4 +32,6 @@ pub enum NosanaStakingError {
     HasReward,
     #[msg("This stake does not belong to the authority.")]
     InvalidStakeAccount,
+    #[msg("Invalid address tree for compressed account.")]
+    InvalidAddressTree,
 }

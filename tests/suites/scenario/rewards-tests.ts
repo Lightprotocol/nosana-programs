@@ -1,9 +1,21 @@
-import { BN } from '@coral-xyz/anchor';
+import { BN, web3 } from '@coral-xyz/anchor';
 import { expect } from 'chai';
 import * as _ from 'lodash';
-import { getTokenBalance, mapUsers, mintNosTo, setupSolanaUser } from '../../utils';
+import {
+  getTokenBalance,
+  mapUsers,
+  mintNosTo,
+  setupSolanaUser,
+  prepareStakeCreate,
+  prepareStakeOperation,
+  prepareStakeReadOnly,
+  fetchCompressedStake,
+} from '../../utils';
 import users from '../../data/users.json';
 import { Context } from 'mocha';
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Accounts = any;
 
 /**
  * Helper to fill the xnosPerc in users
@@ -28,7 +40,7 @@ async function addFee(mochaContext: Context, amount: number) {
   await mochaContext.rewardsProgram.methods
     .addFee(amountBn)
     .accounts({
-      ...mochaContext.accounts,
+      ...mochaContext.accounts as Accounts,
       reflection: mochaContext.accounts.reflection,
       vault: mochaContext.vaults.rewards,
     })
@@ -47,17 +59,25 @@ async function addFee(mochaContext: Context, amount: number) {
  * @param user
  */
 async function claim(mochaContext: Context, user) {
+  const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+    mochaContext.rpc,
+    user.user.stake,
+    mochaContext.stakingProgram.programId,
+    mochaContext.coder,
+  );
+  const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
   await mochaContext.rewardsProgram.methods
-    .claim()
+    .claim(proof, stakeAccountMeta, stakeData)
     .accounts({
-      ...mochaContext.accounts,
-      stake: user.user.stake,
+      ...mochaContext.accounts as Accounts,
       reward: user.user.reward,
       authority: user.user.publicKey,
       user: user.user.ata,
       vault: mochaContext.vaults.rewards,
       reflection: mochaContext.accounts.reflection,
     })
+    .remainingAccounts(remainingAccounts)
+    .preInstructions([computeBudgetIx])
     .signers([user.user.user])
     .rpc();
 }
@@ -69,21 +89,31 @@ async function claim(mochaContext: Context, user) {
  */
 async function sync(mochaContext: Context, user) {
   const reward = await mochaContext.rewardsProgram.account.rewardAccount.fetch(user.user.reward);
-  const stake = await mochaContext.stakingProgram.account.stakeAccount.fetch(user.user.stake);
+  const fetchedStakeData = await fetchCompressedStake(mochaContext.rpc, user.user.stake, mochaContext.coder);
   mochaContext.totalXnos.isub(reward.xnos);
 
+  const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeReadOnly(
+    mochaContext.rpc,
+    user.user.stake,
+    mochaContext.stakingProgram.programId,
+    mochaContext.coder,
+  );
+  const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
   await mochaContext.rewardsProgram.methods
-    .sync()
+    .sync(proof, stakeAccountMeta, stakeData)
     .accounts({
-      stake: user.user.stake,
       reward: user.user.reward,
       reflection: mochaContext.accounts.reflection,
-    })
+      authority: user.user.publicKey,
+    } as Accounts)
+    .remainingAccounts(remainingAccounts)
+    .preInstructions([computeBudgetIx])
+    .signers([user.user.user])
     .rpc();
 
   const reward2 = await mochaContext.rewardsProgram.account.rewardAccount.fetch(user.user.reward);
-  user.duration = stake.duration.toNumber();
-  user.xnos = stake.xnos;
+  user.duration = fetchedStakeData.duration.toNumber();
+  user.xnos = fetchedStakeData.xnos;
   mochaContext.totalXnos.iadd(reward2.xnos);
 }
 
@@ -94,9 +124,18 @@ async function sync(mochaContext: Context, user) {
  * @param duration
  */
 async function extend(mochaContext: Context, user, duration: number) {
+  const { proof, stakeAccountMeta, stakeData, remainingAccounts } = await prepareStakeOperation(
+    mochaContext.rpc,
+    user.user.stake,
+    mochaContext.stakingProgram.programId,
+    mochaContext.coder,
+  );
+  const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
   await mochaContext.stakingProgram.methods
-    .extend(new BN(duration))
-    .accounts({ ...mochaContext.accounts, stake: user.user.stake, authority: user.user.publicKey })
+    .extend(new BN(duration), proof, stakeAccountMeta, stakeData)
+    .accounts({ ...mochaContext.accounts as Accounts, stake: user.user.stake, authority: user.user.publicKey })
+    .remainingAccounts(remainingAccounts)
+    .preInstructions([computeBudgetIx])
     .signers([user.user.user])
     .rpc();
 }
@@ -162,7 +201,7 @@ export default function suite() {
   it('init rewards vault', async function () {
     await this.rewardsProgram.methods
       .init()
-      .accounts({ ...this.accounts, reflection: this.accounts.reflection, vault: this.vaults.rewards })
+      .accounts({ ...this.accounts as Accounts, reflection: this.accounts.reflection, vault: this.vaults.rewards })
       .rpc();
   });
 
@@ -199,16 +238,40 @@ export default function suite() {
         vault: user.user.vault,
       };
 
+      // Prepare compressed stake account creation
+      const { proof, addressTreeInfo, outputStateTreeIndex, remainingAccounts } = await prepareStakeCreate(
+        mochaContext.rpc,
+        user.user.stake,
+        mochaContext.stakingProgram.programId,
+      );
+      const computeBudgetIx = web3.ComputeBudgetProgram.setComputeUnitLimit({ units: 300000 });
+      // First create the stake
       await mochaContext.stakingProgram.methods
-        .stake(user.amount, new BN(user.duration))
-        .accounts(accounts)
-        .postInstructions([await mochaContext.rewardsProgram.methods.enter().accounts(accounts).instruction()])
+        .stake(user.amount, new BN(user.duration), proof, addressTreeInfo, outputStateTreeIndex)
+        .accounts(accounts as Accounts)
+        .remainingAccounts(remainingAccounts)
+        .preInstructions([computeBudgetIx])
         .signers([user.user.user])
         .rpc();
 
-      const stake = await mochaContext.stakingProgram.account.stakeAccount.fetch(user.user.stake);
-      expect(stake.xnos.toNumber()).to.equal(user.xnos.toNumber());
-      totalXnos.iadd(stake.xnos);
+      // Then enter rewards with the newly created stake
+      const enterPrep = await prepareStakeReadOnly(
+        mochaContext.rpc,
+        user.user.stake,
+        mochaContext.stakingProgram.programId,
+        mochaContext.coder,
+      );
+      await mochaContext.rewardsProgram.methods
+        .enter(enterPrep.proof, enterPrep.stakeAccountMeta, enterPrep.stakeData)
+        .accounts({ ...accounts, authority: user.user.publicKey, reward: user.user.reward } as Accounts)
+        .remainingAccounts(enterPrep.remainingAccounts)
+        .preInstructions([computeBudgetIx])
+        .signers([user.user.user])
+        .rpc();
+
+      const stakeData = await fetchCompressedStake(mochaContext.rpc, user.user.stake, mochaContext.coder);
+      expect(stakeData.xnos.toNumber()).to.equal(user.xnos.toNumber());
+      totalXnos.iadd(stakeData.xnos);
       return user;
     });
 
